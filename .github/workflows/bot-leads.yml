@@ -1,0 +1,85 @@
+name: Bot Detecteur de Leads
+on:
+  schedule:
+    - cron: '*/45 * * * *'  # Toutes les 45 minutes
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Scraping Reddit - Recherche de clients potentiels
+        id: reddit
+        run: |
+          echo "=== RECHERCHE SUR REDDIT ==="
+          
+          # Liste des recherches à faire sur Reddit (sans auth, .json gratuit)
+          SERVICES=(
+            "correction+texte+besoin+aide"
+            "traduction+besoin+urgent"
+            "résumé+vidéo+cours"
+            "relecture+CV+conseil"
+            "rédaction+article+contenu"
+            "besoin+service+rédaction"
+            "courrier+lettre+rédaction"
+            "correction+orthographe+grammaire"
+          )
+          
+          echo "✅ Résultats Reddit :" > reddit_results.txt
+          
+          for QUERY in "${SERVICES[@]}"; do
+            echo "Recherche: $QUERY"
+            curl -s --user-agent "Mozilla/5.0" \
+              "https://www.reddit.com/search.json?q=${QUERY}&limit=3&t=week&sort=new" \
+              | jq -r '.data.children[] | "🔴 \(.data.title) | \(.data.permalink) | \(.data.subreddit) | [\(.data.author)]"' 2>/dev/null >> reddit_results.txt
+          done
+          
+          echo "reddit_results.txt"
+          cat reddit_results.txt
+
+      - name: Analyse IA des leads (GitHub Models gratuit)
+        id: analyse
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RESULTATS=$(cat reddit_results.txt)
+          
+          # Appel à GitHub Models (GPT-4o mini gratuit)
+          ANALYSE=$(curl -s -X POST "https://models.inference.ai.azure.com/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"gpt-4o-mini\",
+              \"messages\": [
+                {\"role\": \"system\", \"content\": \"Tu es un assistant qui analyse des posts Reddit pour trouver des clients potentiels.\n\nSERVICES PROPOSÉS :\n- Résumé de vidéo/cours : 4€\n- Correction de texte : 5€/500 mots\n- Traduction rapide : 3€/200 mots\n- Relecture CV : 7€\n- Article de blog : 15€\n\nPour chaque post, dis si la personne a BESOIN d'un de ces services et comment la contacter.\nSois concis.\"},
+                {\"role\": \"user\", \"content\": \"Voici les posts trouvés aujourd'hui :\n\n${RESULTATS}\n\nPour chaque post, réponds :\n1. ✅ ou ❌ (a besoin du service ou pas)\n2. Quelle phrase exacte montre son besoin\n3. Le lien vers le post\n4. Quel service proposer\"}
+              ]
+            }")
+          
+          echo "=== ANALYSE IA ===" > message.txt
+          echo "$ANALYSE" | jq -r '.choices[0].message.content' >> message.txt
+          
+          echo "Message final :"
+          cat message.txt
+
+      - name: Envoyer alerte Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          MESSAGE=$(cat message.txt)
+          
+          # Envoyer le message à Telegram
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=🔍 NOUVEAUX LEADS TROUVÉS $(date '+%H:%M')
+          
+          ${MESSAGE}
+          
+          💡 VA SUR LE LIEN ET CONTACTE LA PERSONNE !
+          ⏱ Prochain scan dans 45 minutes" \
+            -d "parse_mode=Markdown"
+          
+          echo "✅ Alerte Telegram envoyée !"
